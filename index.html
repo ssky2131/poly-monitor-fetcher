@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>poly-fetcher</title></head>
+<body><pre id="o">LOADING</pre>
+<script>
+const G = 'https://gamma-api.polymarket.com';
+const out = document.getElementById('o');
+function say(s){ out.textContent = s; }
+async function fetchJson(u){
+  const wraps = [
+    x => x,
+    x => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(x),
+    x => 'https://api.cors.lol/?url=' + encodeURIComponent(x)
+  ];
+  let lastErr = '';
+  for (const w of wraps){
+    try{
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 20000);
+      const r = await fetch(w(u), {signal: ctl.signal});
+      clearTimeout(t);
+      if (r.ok) return await r.json();
+      lastErr = 'http ' + r.status;
+    }catch(e){ lastErr = String(e); }
+  }
+  throw new Error('FETCH_FAILED ' + u + ' :: ' + lastErr);
+}
+function binMarkets(events, topN){
+  const rows = [];
+  for (const e of (events || [])){
+    for (const m of (e.markets || [])){
+      if (m.closed || m.active === false) continue;
+      let oc = m.outcomes;
+      try{ if (typeof oc === 'string') oc = JSON.parse(oc); }catch(x){ continue; }
+      if (!Array.isArray(oc) || oc.length !== 2 || oc[0] !== 'Yes' || oc[1] !== 'No') continue;
+      let op = m.outcomePrices;
+      try{ if (typeof op === 'string') op = JSON.parse(op); }catch(x){ continue; }
+      const yes = parseFloat(op && op[0]);
+      if (isNaN(yes)) continue;
+      rows.push({
+        id: String(m.id),
+        q: m.question || e.title || '',
+        yes: yes,
+        v: +m.volume24hr || 0,
+        c: (m.oneDayPriceChange !== null && m.oneDayPriceChange !== undefined) ? +m.oneDayPriceChange : null
+      });
+    }
+  }
+  rows.sort((a,b) => b.v - a.v);
+  return rows.slice(0, topN);
+}
+async function fillMissing(events){
+  const miss = (events || []).filter(e => !e.markets || !e.markets.length).slice(0, 10);
+  for (const e of miss){
+    try{ const f = await fetchJson(G + '/events/' + e.id); e.markets = f.markets || []; }catch(x){}
+  }
+}
+async function getRua(){
+  let d = await fetchJson(G + '/events?tag_slug=russia-ukraine-war&active=true&closed=false&limit=50&order=volume24hr&ascending=false');
+  if (!Array.isArray(d) || !d.length){
+    const KEYS = ['ukraine','russia','zelensky','putin','kyiv','moscow','crimea'];
+    const seen = {}, evs = [];
+    for (const q of ['ukraine','russia ukraine']){
+      const r = await fetchJson(G + '/public-search?q=' + encodeURIComponent(q) + '&limit_per_type=15').catch(() => null);
+      for (const e of ((r && r.events) || [])){
+        if (seen[e.id]) continue;
+        const t = ((e.title||'') + ' ' + (e.slug||'') + ' ' + ((e.tags||[]).map(x => (x.label||'') + ' ' + (x.slug||'')).join(' '))).toLowerCase();
+        if (KEYS.some(k => t.includes(k))){ seen[e.id] = 1; evs.push(e); }
+      }
+    }
+    d = evs;
+  }
+  await fillMissing(d);
+  return binMarkets(d, 20);
+}
+async function getPolitics(){
+  let d = await fetchJson(G + '/events?tag_slug=politics&active=true&closed=false&limit=60&order=volume24hr&ascending=false');
+  if (!Array.isArray(d) || !d.length){
+    const all = await fetchJson(G + '/events?active=true&closed=false&limit=200&order=volume24hr&ascending=false');
+    d = (all || []).filter(e => {
+      const t = ((e.tags||[]).map(x => (x.label||'') + ' ' + (x.slug||'')).join(' ')).toLowerCase();
+      return t.includes('politic') || t.includes('election');
+    });
+  }
+  await fillMissing(d);
+  return binMarkets(d, 10);
+}
+(async function(){
+  const res = {rua: null, politics: null, err: {}};
+  try{ res.rua = await getRua(); say('RUA_DONE ' + res.rua.length); }catch(e){ res.err.rua = String(e); }
+  try{ res.politics = await getPolitics(); say('POL_DONE ' + res.politics.length); }catch(e){ res.err.politics = String(e); }
+  say('FINAL:' + JSON.stringify(res));
+})();
+</script>
+</body>
+</html>
